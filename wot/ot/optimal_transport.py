@@ -64,7 +64,7 @@ def dual(C, K, R, dx, dy, p, q, a, b, epsilon, lambda1, lambda2):
 
 # end @ Lénaïc Chizat
 
-def optimal_transport_duality_gap(C, G, lambda1, lambda2, epsilon, batch_size, tolerance, tau,
+def optimal_transport_duality_gap(C, G, lambda1, lambda2, dx, dy, epsilon, batch_size, tolerance, tau,
                                   epsilon0, max_iter, **ignored):
     """
     Compute the optimal transport with stabilized numerics, with the guarantee that the duality gap is at most `tolerance`
@@ -79,6 +79,10 @@ def optimal_transport_duality_gap(C, G, lambda1, lambda2, epsilon, batch_size, t
         Regularization parameter for the marginal constraint on p
     lambda2 : float, optional
         Regularization parameter for the marginal constraint on q
+    dx : 1-D array_like
+        Weights for cells with dx.shape[0] == C.shape[0]
+    dy : 1-D array_like
+        Weights for cells with dy.shape[0] == C.shape[1]
     epsilon : float, optional
         Entropy regularization parameter.
     batch_size : int, optional
@@ -102,10 +106,9 @@ def optimal_transport_duality_gap(C, G, lambda1, lambda2, epsilon, batch_size, t
     scale_factor = np.exp(- np.log(epsilon) / epsilon_scalings)
 
     I, J = C.shape
-    dx, dy = np.ones(I) / I, np.ones(J) / J
 
     p = G
-    q = np.ones(C.shape[1]) * np.average(G)
+    q = np.ones(J) * np.average(G)
 
     u, v = np.zeros(I), np.zeros(J)
     a, b = np.ones(I), np.ones(J)
@@ -164,7 +167,7 @@ def optimal_transport_duality_gap(C, G, lambda1, lambda2, epsilon, batch_size, t
     return R / C.shape[1]
 
 
-def transport_stablev2(C, lambda1, lambda2, epsilon, scaling_iter, G, tau, epsilon0, extra_iter, inner_iter_max,
+def transport_stablev2(C, lambda1, lambda2, dx, dy, epsilon, scaling_iter, G, tau, epsilon0, extra_iter, inner_iter_max,
                        **ignored):
     """
     Compute the optimal transport with stabilized numerics.
@@ -173,6 +176,8 @@ def transport_stablev2(C, lambda1, lambda2, epsilon, scaling_iter, G, tau, epsil
         C: cost matrix to transport cell i to cell j
         lambda1: regularization parameter for marginal constraint for p.
         lambda2: regularization parameter for marginal constraint for q.
+        dx: Weights for cells with dx.shape[0] == C.shape[0]
+        dy: Weights for cells with dy.shape[0] == C.shape[1]
         epsilon: entropy parameter
         scaling_iter: number of scaling iterations
         G: growth value for input cells
@@ -185,8 +190,6 @@ def transport_stablev2(C, lambda1, lambda2, epsilon, scaling_iter, G, tau, epsil
         return (epsilon0 - epsilon_final) * np.exp(-n) + epsilon_final
 
     epsilon_i = epsilon0 if warm_start else epsilon
-    dx = np.ones(C.shape[0]) / C.shape[0]
-    dy = np.ones(C.shape[1]) / C.shape[1]
 
     p = G
     q = np.ones(C.shape[1]) * np.average(G)

@@ -16,6 +16,24 @@ import wot.ot
 logger = logging.getLogger('wot')
 
 
+def get_weight_cols(weight_prefix, df):
+    if weight_prefix is None:
+        return
+    nchars = len(weight_prefix)
+    for c in df.columns:
+        if not c.startswith(weight_prefix):
+            continue
+        yield float(c[nchars:]), c
+
+def day_idx(df, day, day_field=None, weight_columns=None):
+    if isinstance(day, list) or isinstance(day, set):
+        return np.any(np.stack([day_idx(d) for d in day]), axis=0)
+    if weight_columns:
+        col = weight_columns[day]
+        return df[col] > 0
+    return df[day_field] == day
+
+
 class OTModel:
     """
     The OTModel computes transport maps.
@@ -34,10 +52,11 @@ class OTModel:
         Dictionary of parameters. Will be inserted as is into OT configuration.
     """
 
-    def __init__(self, matrix, day_field='day', covariate_field='covariate',
+    def __init__(self, matrix, day_field='day', weight_prefix=None, covariate_field='covariate',
                  growth_rate_field='cell_growth_rate', **kwargs):
         self.matrix = matrix
         self.day_field = day_field
+        self.weight_prefix = weight_prefix
         self.covariate_field = covariate_field
         self.cell_growth_rate_field = growth_rate_field
         self.day_pairs = wot.ot.parse_configuration(kwargs.pop('config', None))
@@ -47,16 +66,17 @@ class OTModel:
         ncounts = kwargs.pop('ncounts', None)
         ncells = kwargs.pop('ncells', None)
         self.matrix = wot.io.filter_adata(self.matrix, obs_filter=cell_filter, var_filter=gene_filter)
+        self.weight_columns = {day:column for day, column in get_weight_cols(weight_prefix, self.matrix.obs)}
         if day_filter is not None:
             days = [float(day) for day in day_filter.split(',')] if type(day_filter) == str else day_filter
-            row_indices = self.matrix.obs[self.day_field].isin(days)
+            row_indices = day_idx(self.matrix.ob, days, day_field, self.weight_columns)
             self.matrix = self.matrix[row_indices].copy()
 
         cvs = set(self.matrix.obs[self.covariate_field]) if self.covariate_field in self.matrix.obs else [None]
         if ncells is not None:
             index_list = []
             for day in self.timepoints:
-                day_query = self.matrix.obs[self.day_field] == day
+                day_query = day_idx(self.matrix.ob, day, day_field, self.weight_columns)
                 for cv in cvs:
                     if cv is None:
                         indices = np.where(day_query)[0]
@@ -107,11 +127,20 @@ class OTModel:
             logger.warning("local_pca set to {}, above gene count of {}. Disabling PCA" \
                            .format(local_pca, self.matrix.X.shape[1]))
             self.ot_config['local_pca'] = 0
-        if self.day_field not in self.matrix.obs.columns:
-            raise ValueError("Days information not available for matrix")
-        if any(self.matrix.obs[self.day_field].isnull()):
-            self.matrix = self.matrix[self.matrix.obs[self.day_field].isnull() == False]
-        self.timepoints = sorted(set(self.matrix.obs[self.day_field]))
+        if weight_prefix is None:
+            if self.day_field not in self.matrix.obs.columns:
+                raise ValueError("Days information not available for matrix")
+            if any(self.matrix.obs[self.day_field].isnull()):
+                self.matrix = self.matrix[self.matrix.obs[self.day_field].isnull() == False]
+            self.timepoints = sorted(set(self.matrix.obs[self.day_field]))
+        else:
+            logger.info(
+                "Using day weights in columns with prefix '%s' instead of day column.",
+                weight_prefix,
+            )
+            if len(self.weight_columns) == 0:
+                raise ValueError("Weight information not available in obs.")
+            self.timepoints = sorted(list(self.weight_columns.keys()))
 
     def get_covariate_pairs(self):
         """Get all covariate pairs in the dataset"""
@@ -273,13 +302,12 @@ class OTModel:
         if t0 is None or t1 is None:
             raise ValueError("config must have both t0 and t1, indicating target timepoints")
         ds = self.matrix
+        p0_indices = day_idx(ds.obs, float(t0), self.day_field, self.weight_columns)
+        p1_indices = day_idx(ds.obs, float(t1), self.day_field, self.weight_columns)
         covariate = config.pop('covariate', None)
-        if covariate is None:
-            p0_indices = ds.obs[self.day_field] == float(t0)
-            p1_indices = ds.obs[self.day_field] == float(t1)
-        else:
-            p0_indices = (ds.obs[self.day_field] == float(t0)) & (ds.obs[self.covariate_field] == covariate[0])
-            p1_indices = (ds.obs[self.day_field] == float(t1)) & (ds.obs[self.covariate_field] == covariate[1])
+        if covariate is not None:
+            p0_indices = p0_indices & (ds.obs[self.covariate_field] == covariate[0])
+            p1_indices = p1_indices & (ds.obs[self.covariate_field] == covariate[1])
 
         p0 = ds[p0_indices, :]
         p1 = ds[p1_indices, :]
@@ -310,6 +338,16 @@ class OTModel:
         
         C = config['C']
         delta_days = t1 - t0
+
+        if self.weight_prefix is None and config.get('dx', None) is None:
+            config['dx'] = np.ones(C.shape[0]) / C.shape[0]
+        if self.weight_prefix is None and config.get('dy', None) is None:
+            config['dy'] = np.ones(C.shape[1]) / C.shape[1]
+        if self.weight_prefix is not None:
+            cx = self.weight_columns[float(t0)]
+            config['dx'] = ds.obs.loc[p0_indices, cx].values
+            cy = self.weight_columns[float(t1)]
+            config['dy'] = ds.obs.loc[p1_indices, cy].values
 
         if self.cell_growth_rate_field in p0.obs.columns:
             config['G'] = np.power(p0.obs[self.cell_growth_rate_field].values, delta_days)
